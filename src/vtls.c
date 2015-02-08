@@ -59,6 +59,7 @@
 #include "urldata.h"
 
 #include "vtls.h" /* generic SSL protos etc */
+#include "utils.h"
 #include "slist.h"
 #include "sendf.h"
 #include "rawstr.h"
@@ -82,16 +83,6 @@
                                  (data->share->specifier &             \
                                   (1<<CURL_LOCK_DATA_SSL_SESSION)))
 
-static bool safe_strequal(char* str1, char* str2)
-{
-  if(str1 && str2)
-    /* both pointers point to something then compare them */
-    return (0 != Curl_raw_equal(str1, str2)) ? TRUE : FALSE;
-  else
-    /* if both pointers are NULL then treat them as equal */
-    return (!str1 && !str2) ? TRUE : FALSE;
-}
-
 bool
 Curl_ssl_config_matches(struct ssl_config_data* data,
                         struct ssl_config_data* needle)
@@ -99,11 +90,11 @@ Curl_ssl_config_matches(struct ssl_config_data* data,
   if((data->version == needle->version) &&
      (data->verifypeer == needle->verifypeer) &&
      (data->verifyhost == needle->verifyhost) &&
-     safe_strequal(data->CApath, needle->CApath) &&
-     safe_strequal(data->CAfile, needle->CAfile) &&
-     safe_strequal(data->random_file, needle->random_file) &&
-     safe_strequal(data->egdsocket, needle->egdsocket) &&
-     safe_strequal(data->cipher_list, needle->cipher_list))
+     vtls_c_strcasecmp(data->CApath, needle->CApath) &&
+     vtls_c_strcasecmp(data->CAfile, needle->CAfile) &&
+     vtls_c_strcasecmp(data->random_file, needle->random_file) &&
+     vtls_c_strcasecmp(data->egdsocket, needle->egdsocket) &&
+     vtls_c_strcasecmp(data->cipher_list, needle->cipher_list))
     return TRUE;
 
   return FALSE;
