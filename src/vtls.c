@@ -154,11 +154,11 @@ Curl_clone_ssl_config(struct ssl_config_data *source,
 
 void Curl_free_ssl_config(struct ssl_config_data* sslc)
 {
-  Curl_safefree(sslc->CAfile);
-  Curl_safefree(sslc->CApath);
-  Curl_safefree(sslc->cipher_list);
-  Curl_safefree(sslc->egdsocket);
-  Curl_safefree(sslc->random_file);
+  vtls_safefree(sslc->CAfile);
+  vtls_safefree(sslc->CApath);
+  vtls_safefree(sslc->cipher_list);
+  vtls_safefree(sslc->egdsocket);
+  vtls_safefree(sslc->random_file);
 }
 
 
@@ -373,7 +373,7 @@ void Curl_ssl_kill_session(struct curl_ssl_session *session)
 
     Curl_free_ssl_config(&session->ssl_config);
 
-    Curl_safefree(session->name);
+    vtls_safefree(session->name);
   }
 }
 
@@ -487,7 +487,7 @@ void Curl_ssl_close_all(struct SessionHandle *data)
       Curl_ssl_kill_session(&data->state.session[i]);
 
     /* free the cache data */
-    Curl_safefree(data->state.session);
+    vtls_safefree(data->state.session);
   }
 
   curlssl_close_all(data);
@@ -731,7 +731,7 @@ static CURLcode pubkey_pem_to_der(const char *pem,
 
   result = Curl_base64_decode(stripped_pem, der, der_len);
 
-  Curl_safefree(stripped_pem);
+  vtls_safefree(stripped_pem);
 
   return result;
 }
@@ -814,8 +814,8 @@ CURLcode Curl_pin_peer_pubkey(const char *pinnedpubkey,
       result = CURLE_OK;
   } while(0);
 
-  Curl_safefree(buf);
-  Curl_safefree(pem_ptr);
+  vtls_safefree(buf);
+  vtls_safefree(pem_ptr);
   fclose(fp);
 
   return result;
