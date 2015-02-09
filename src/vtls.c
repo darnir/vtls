@@ -58,7 +58,7 @@
 
 #include "urldata.h"
 
-#include "vtls.h" /* generic SSL protos etc */
+#include <vtls.h> /* generic SSL protos etc */
 #include "slist.h"
 #include "sendf.h"
 #include "rawstr.h"
