@@ -80,18 +80,20 @@ PKG_PROG_PKG_CONFIG
 AC_SUBST([LIBVTLS_SO_VERSION], [0:0:0])
 AC_SUBST([LIBVTLS_VERSION], $VERSION)
 
-# Solaris has socket in libsocket and inet_ntop in libnsl, but also needs libsocket, so the order is important here
-AC_CHECK_LIB([socket], [socket], [NEEDS_SOCKET=yes], [])
-if test -n "$NEEDS_SOCKET" ; then
-  AC_CHECK_LIB([nsl], [inet_ntop], [NEEDS_NSL=yes], [])
-fi
-if test -n "$NEEDS_SOCKET" && test -n "$NEEDS_NSL" ; then
-  LIBS="$LIBS -lsocket -lnsl"
-elif test -n "$NEEDS_SOCKET" ; then
-  LIBS="$LIBS -lsocket"
-elif test -n "$NEEDS_NSL" ; then
-  LIBS="$LIBS -lnsl"
-fi
+AC_ARG_WITH(gnutls, AS_HELP_STRING([--without-gnutls], [disable GNUTLS SSL support]), use_gnutls=$withval, use_gnutls=yes)
+AS_IF([test "x$use_gnutls" != "xno"], [
+  PKG_CHECK_MODULES([GNUTLS], [gnutls], [
+    use_gnutls=yes
+    LIBS="$GNUTLS_LIBS $LIBS"
+    CFLAGS="$GNUTLS_CFLAGS $CFLAGS"
+    AC_DEFINE([USE_GNUTLS], [1], [Use GnuTLS])
+  ], [
+    AC_SEARCH_LIBS(gnutls_global_init, gnutls,
+      [use_gnutls=yes; AC_DEFINE([USE_GNUTLS], [1], [Use GnuTLS])],
+      [use_gnutls=no;  AC_MSG_WARN(*** GNUTLS was not found. You will not be able to libvtls-gnutls.)])
+  ])
+])
+AM_CONDITIONAL([USE_GNUTLS], [test "x$use_gnutls" = xyes])
 
 # Check for valgrind
 ac_enable_valgrind=no
@@ -134,5 +136,6 @@ AC_MSG_NOTICE([Summary of build options:
   CFlags:            ${CFLAGS} ${CPPFLAGS}
   LDFlags:           ${LDFLAGS}
   Libs:              ${LIBS}
+  GnuTLS:            ${use_gnutls}
   Tests:             ${TESTS_INFO}
 ])
