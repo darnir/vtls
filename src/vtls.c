@@ -27,7 +27,7 @@
 	SSL-functions in libcurl should call functions in this source file, and not
 	to any specific SSL-layer.
 
-	Curl_ssl_ - prefix for generic ones
+	vtls_ - prefix for generic ones
 	Curl_ossl_ - prefix for OpenSSL ones
 	Curl_gtls_ - prefix for GnuTLS ones
 	Curl_nss_ - prefix for NSS ones
@@ -281,10 +281,10 @@ unsigned int vtls_rand(struct SessionHandle *data, int force_entropy, const char
 	}
 
 	/* data may be NULL! */
-	if (!Curl_ssl_random(data, (unsigned char *) &r, sizeof(r)))
+	if (!vtls_random(data, (unsigned char *) &r, sizeof(r)))
 		return r;
 
-	/* If Curl_ssl_random() returns non-zero it couldn't offer randomness and we
+	/* If vtls_random() returns non-zero it couldn't offer randomness and we
 		instead perform a "best effort" */
 
 	if (random_file) {
@@ -316,13 +316,13 @@ unsigned int vtls_rand(struct SessionHandle *data, int force_entropy, const char
 	return(r << 16) | ((r >> 16) & 0xFFFF);
 }
 
-int vtls_backend(void)
+int vtls_get_engine(void)
 {
-	return curlssl_backend();
+	return backend_get_engine();
 }
 
 /* "global" init done? */
-static int init_vtls = 0;
+static int _init_vtls = 0;
 
 /**
  * Global SSL init
@@ -333,22 +333,22 @@ static int init_vtls = 0;
 int vtls_init(void)
 {
 	/* make sure this is only done once */
-	if (init_vtls++)
+	if (_init_vtls++)
 		return 1;
 
-	return curlssl_init();
+	return backend_init();
 }
 
 /* Global cleanup */
 void vtls_deinit(void)
 {
-	if (--init_vtls == 0) {
+	if (--_init_vtls == 0) {
 		/* only cleanup if we did a previous init */
-		curlssl_cleanup();
+		backend_deinit();
 	}
 }
 
-int Curl_ssl_connect(struct connectdata *conn, int sockindex)
+int vtls_connect(struct connectdata *conn, int sockindex)
 {
 	int result;
 
@@ -364,7 +364,7 @@ int Curl_ssl_connect(struct connectdata *conn, int sockindex)
 	return result;
 }
 
-int Curl_ssl_connect_nonblocking(struct connectdata *conn, int sockindex, int *done)
+int vtls_connect_nonblocking(struct connectdata *conn, int sockindex, int *done)
 {
 	int result;
 	/* mark this is being ssl requested from here on. */
@@ -384,7 +384,7 @@ int Curl_ssl_connect_nonblocking(struct connectdata *conn, int sockindex, int *d
  * Check if there's a session ID for the given connection in the cache, and if
  * there's one suitable, it is provided. Returns 1 when no entry matched.
  */
-int Curl_ssl_getsessionid(struct connectdata *conn,
+int vtls_getsessionid(struct connectdata *conn,
 	void **ssl_sessionid,
 	size_t *idsize) /* set 0 if unknown */
 {
@@ -436,7 +436,7 @@ int Curl_ssl_getsessionid(struct connectdata *conn,
 /*
  * Kill a single session ID entry in the cache.
  */
-void Curl_ssl_kill_session(struct curl_ssl_session *session)
+void vtls_kill_session(struct curl_ssl_session *session)
 {
 	if (session->sessionid) {
 		/* defensive check */
@@ -456,7 +456,7 @@ void Curl_ssl_kill_session(struct curl_ssl_session *session)
 /*
  * Delete the given session ID from the cache.
  */
-void Curl_ssl_delsessionid(struct connectdata *conn, void *ssl_sessionid)
+void vtls_delsessionid(struct connectdata *conn, void *ssl_sessionid)
 {
 	size_t i;
 	struct SessionHandle *data = conn->data;
@@ -468,7 +468,7 @@ void Curl_ssl_delsessionid(struct connectdata *conn, void *ssl_sessionid)
 		struct curl_ssl_session *check = &data->state.session[i];
 
 		if (check->sessionid == ssl_sessionid) {
-			Curl_ssl_kill_session(check);
+			vtls_kill_session(check);
 			break;
 		}
 	}
@@ -483,7 +483,7 @@ void Curl_ssl_delsessionid(struct connectdata *conn, void *ssl_sessionid)
  * layer. Curl_XXXX_session_free() will be called to free/kill the session ID
  * later on.
  */
-int Curl_ssl_addsessionid(struct connectdata *conn,
+int vtls_addsessionid(struct connectdata *conn,
 	void *ssl_sessionid,
 	size_t idsize)
 {
@@ -523,7 +523,7 @@ int Curl_ssl_addsessionid(struct connectdata *conn,
 	}
 	if (i == data->set.ssl.max_ssl_sessions)
 		/* cache is full, we must "kill" the oldest entry! */
-		Curl_ssl_kill_session(store);
+		vtls_kill_session(store);
 	else
 		store = &data->state.session[i]; /* use this slot */
 
@@ -551,14 +551,14 @@ int Curl_ssl_addsessionid(struct connectdata *conn,
 	return CURLE_OK;
 }
 
-void Curl_ssl_close_all(struct SessionHandle *data)
+void vtls_close_all(struct SessionHandle *data)
 {
 	size_t i;
 	/* kill the session ID cache if not shared */
 	if (data->state.session && !SSLSESSION_SHARED(data)) {
 		for (i = 0; i < data->set.ssl.max_ssl_sessions; i++)
 			/* the single-killer function handles empty table slots */
-			Curl_ssl_kill_session(&data->state.session[i]);
+			vtls_kill_session(&data->state.session[i]);
 
 		/* free the cache data */
 		xfree(data->state.session);
@@ -567,13 +567,13 @@ void Curl_ssl_close_all(struct SessionHandle *data)
 	curlssl_close_all(data);
 }
 
-void Curl_ssl_close(struct connectdata *conn, int sockindex)
+void vtls_close(struct connectdata *conn, int sockindex)
 {
 	DEBUGASSERT((sockindex <= 1) && (sockindex >= -1));
 	curlssl_close(conn, sockindex);
 }
 
-int Curl_ssl_shutdown(struct connectdata *conn, int sockindex)
+int vtls_shutdown(struct connectdata *conn, int sockindex)
 {
 	if (curlssl_shutdown(conn, sockindex))
 		return CURLE_SSL_SHUTDOWN_FAILED;
@@ -589,20 +589,20 @@ int Curl_ssl_shutdown(struct connectdata *conn, int sockindex)
 
 /* Selects an SSL crypto engine
  */
-int Curl_ssl_set_engine(struct SessionHandle *data, const char *engine)
+int vtls_set_engine(struct SessionHandle *data, const char *engine)
 {
 	return curlssl_set_engine(data, engine);
 }
 
 /* Selects the default SSL crypto engine
  */
-int Curl_ssl_set_engine_default(struct SessionHandle *data)
+int vtls_set_engine_default(struct SessionHandle *data)
 {
 	return curlssl_set_engine_default(data);
 }
 
 /* Return list of OpenSSL crypto engine names. */
-struct curl_slist *Curl_ssl_engines_list(struct SessionHandle *data)
+struct curl_slist *vtls_engines_list(struct SessionHandle *data)
 {
 	return curlssl_engines_list(data);
 }
@@ -611,7 +611,7 @@ struct curl_slist *Curl_ssl_engines_list(struct SessionHandle *data)
  * This sets up a session ID cache to the specified size. Make sure this code
  * is agnostic to what underlying SSL technology we use.
  */
-int Curl_ssl_initsessions(struct SessionHandle *data, size_t amount)
+int vtls_initsessions(struct SessionHandle *data, size_t amount)
 {
 	struct curl_ssl_session *session;
 
@@ -630,7 +630,7 @@ int Curl_ssl_initsessions(struct SessionHandle *data, size_t amount)
 	return CURLE_OK;
 }
 
-size_t Curl_ssl_version(char *buffer, size_t size)
+size_t vtls_version(char *buffer, size_t size)
 {
 	return curlssl_version(buffer, size);
 }
@@ -643,18 +643,18 @@ size_t Curl_ssl_version(char *buffer, size_t size)
  *     0 means the connection has been closed
  *    -1 means the connection status is unknown
  */
-int Curl_ssl_check_cxn(struct connectdata *conn)
+int vtls_check_cxn(struct connectdata *conn)
 {
 	return curlssl_check_cxn(conn);
 }
 
-int Curl_ssl_data_pending(const struct connectdata *conn,
+int vtls_data_pending(const struct connectdata *conn,
 	int connindex)
 {
 	return curlssl_data_pending(conn, connindex);
 }
 
-void Curl_ssl_free_certinfo(struct SessionHandle *data)
+void vtls_free_certinfo(struct SessionHandle *data)
 {
 	int i;
 	struct curl_certinfo *ci = &data->info.certs;
@@ -672,13 +672,13 @@ void Curl_ssl_free_certinfo(struct SessionHandle *data)
 	}
 }
 
-int Curl_ssl_init_certinfo(struct SessionHandle *data, int num)
+int vtls_init_certinfo(struct SessionHandle *data, int num)
 {
 	struct curl_certinfo *ci = &data->info.certs;
 	struct curl_slist **table;
 
 	/* Free any previous certificate information structures */
-	Curl_ssl_free_certinfo(data);
+	vtls_free_certinfo(data);
 
 	/* Allocate the required certificate information structures */
 	table = calloc((size_t) num, sizeof(struct curl_slist *));
@@ -694,7 +694,7 @@ int Curl_ssl_init_certinfo(struct SessionHandle *data, int num)
 /*
  * 'value' is NOT a zero terminated string
  */
-int Curl_ssl_push_certinfo_len(struct SessionHandle *data,
+int vtls_push_certinfo_len(struct SessionHandle *data,
 	int certnum,
 	const char *label,
 	const char *value,
@@ -735,17 +735,17 @@ int Curl_ssl_push_certinfo_len(struct SessionHandle *data,
  * This is a convenience function for push_certinfo_len that takes a zero
  * terminated value.
  */
-int Curl_ssl_push_certinfo(struct SessionHandle *data,
+int vtls_push_certinfo(struct SessionHandle *data,
 	int certnum,
 	const char *label,
 	const char *value)
 {
 	size_t valuelen = strlen(value);
 
-	return Curl_ssl_push_certinfo_len(data, certnum, label, value, valuelen);
+	return vtls_push_certinfo_len(data, certnum, label, value, valuelen);
 }
 
-int Curl_ssl_random(struct SessionHandle *data,
+int vtls_random(struct SessionHandle *data,
 	unsigned char *entropy,
 	size_t length)
 {
@@ -895,7 +895,7 @@ int Curl_pin_peer_pubkey(const char *pinnedpubkey,
 	return result;
 }
 
-void Curl_ssl_md5sum(unsigned char *tmp, /* input */
+void vtls_md5sum(unsigned char *tmp, /* input */
 	size_t tmplen,
 	unsigned char *md5sum, /* output */
 	size_t md5len)
@@ -916,7 +916,7 @@ void Curl_ssl_md5sum(unsigned char *tmp, /* input */
 /*
  * Check whether the SSL backend supports the status_request extension.
  */
-int Curl_ssl_cert_status_request(void)
+int vtls_cert_status_request(void)
 {
 #ifdef curlssl_cert_status_request
 	return curlssl_cert_status_request();
