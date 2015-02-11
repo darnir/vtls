@@ -45,6 +45,12 @@
 #define ALPN_HTTP_1_1_LENGTH 8
 #define ALPN_HTTP_1_1 "http/1.1"
 
+typedef enum {
+  ssl_connection_none,
+  ssl_connection_negotiating,
+  ssl_connection_complete
+} ssl_connection_state;
+
 /* enum for the different supported SSL backends */
 typedef enum {
 	CURLSSLBACKEND_NONE = 0,
@@ -224,55 +230,47 @@ unsigned int vtls_rand(struct SessionHandle *);
 int vtls_backend(void);
 int vtls_init(void);
 void vtls_deinit(void);
-int Curl_ssl_connect(struct connectdata *conn, int sockindex);
-int Curl_ssl_connect_nonblocking(struct connectdata *conn, int sockindex, int *done);
+int vtls_connect(struct connectdata *conn, int sockindex);
+int vtls_connect_nonblocking(struct connectdata *conn, int sockindex, int *done);
 /* tell the SSL stuff to close down all open information regarding
 	connections (and thus session ID caching etc) */
-void Curl_ssl_close_all(struct SessionHandle *data);
-void Curl_ssl_close(struct connectdata *conn, int sockindex);
-int Curl_ssl_shutdown(struct connectdata *conn, int sockindex);
-int Curl_ssl_set_engine(struct SessionHandle *data, const char *engine);
+void vtls_close_all(struct SessionHandle *data);
+void vtls_close(struct connectdata *conn, int sockindex);
+int vtls_shutdown(struct connectdata *conn, int sockindex);
+int vtls_set_engine(struct SessionHandle *data, const char *engine);
 /* Sets engine as default for all SSL operations */
-int Curl_ssl_set_engine_default(struct SessionHandle *data);
-struct curl_slist *Curl_ssl_engines_list(struct SessionHandle *data);
-
-/* init the SSL session ID cache */
-int Curl_ssl_initsessions(struct SessionHandle *, size_t);
-size_t Curl_ssl_version(char *buffer, size_t size);
-int Curl_ssl_data_pending(const struct connectdata *conn,
-	int connindex);
-int Curl_ssl_check_cxn(struct connectdata *conn);
+int vtls_set_engine_default(struct SessionHandle *data);
+struct curl_slist *vtls_engines_list(struct SessionHandle *data);
 
 /* Certificate information list handling. */
-
-void Curl_ssl_free_certinfo(struct SessionHandle *data);
-int Curl_ssl_init_certinfo(struct SessionHandle * data, int num);
-int Curl_ssl_push_certinfo_len(struct SessionHandle * data, int certnum,
+void vtls_free_certinfo(struct SessionHandle *data);
+int vtls_init_certinfo(struct SessionHandle * data, int num);
+int vtls_push_certinfo_len(struct SessionHandle * data, int certnum,
 	const char * label, const char * value,
 	size_t valuelen);
-int Curl_ssl_push_certinfo(struct SessionHandle * data, int certnum,
+int vtls_push_certinfo(struct SessionHandle * data, int certnum,
 	const char * label, const char * value);
 
 /* Functions to be used by SSL library adaptation functions */
 
 /* extract a session ID */
-int Curl_ssl_getsessionid(struct connectdata *conn,
+int vtls_getsessionid(struct connectdata *conn,
 	void **ssl_sessionid,
 	size_t *idsize) /* set 0 if unknown */;
 /* add a new session ID */
-int Curl_ssl_addsessionid(struct connectdata *conn,
+int vtls_addsessionid(struct connectdata *conn,
 	void *ssl_sessionid,
 	size_t idsize);
 /* Kill a single session ID entry in the cache */
-void Curl_ssl_kill_session(struct curl_ssl_session *session);
+void vtls_kill_session(struct curl_ssl_session *session);
 /* delete a session from the cache */
-void Curl_ssl_delsessionid(struct connectdata *conn, void *ssl_sessionid);
+void vtls_delsessionid(struct connectdata *conn, void *ssl_sessionid);
 
 /* get N random bytes into the buffer, return 0 if a find random is filled
 	in */
-int Curl_ssl_random(struct SessionHandle *data, unsigned char *buffer,
+int vtls_random(struct SessionHandle *data, unsigned char *buffer,
 	size_t length);
-void Curl_ssl_md5sum(unsigned char *tmp, /* input */
+int vtls_md5sum(unsigned char *tmp, /* input */
 	size_t tmplen,
 	unsigned char *md5sum, /* output */
 	size_t md5len);
@@ -280,7 +278,7 @@ void Curl_ssl_md5sum(unsigned char *tmp, /* input */
 int Curl_pin_peer_pubkey(const char *pinnedpubkey,
 	const unsigned char *pubkey, size_t pubkeylen);
 
-int Curl_ssl_cert_status_request(void);
+int vtls_cert_status_request(void);
 
 #define SSL_SHUTDOWN_TIMEOUT 10000 /* ms */
 

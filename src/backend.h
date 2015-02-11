@@ -4,6 +4,13 @@
 /* Set the API backend definition to GnuTLS */
 #define CURL_SSL_BACKEND CURLSSLBACKEND_GNUTLS
 
+typedef struct {
+	void *ssl_session;
+	int sockfd;
+	int use;
+	int state;
+} vtls_session_t;
+
 /* API of backend TLS engines */
 /*
 #define curlssl_close_all(x) ((void)x)

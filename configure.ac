@@ -124,6 +124,7 @@ AC_CHECK_FUNCS([strndup clock_gettime gettimeofday])
 AC_CONFIG_FILES([Makefile
                  include/Makefile
                  src/Makefile
+                 examples/Makefile
                  libvtls.pc:libvtls.pc.in])
 AC_OUTPUT
 

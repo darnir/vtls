@@ -53,6 +53,8 @@
 // #include "urldata.h"
 
 #include <vtls.h> /* generic SSL protos etc */
+#include "timeval.h"
+
 /*
 #include "slist.h"
 #include "sendf.h"
@@ -281,7 +283,7 @@ unsigned int vtls_rand(struct SessionHandle *data, int force_entropy, const char
 	}
 
 	/* data may be NULL! */
-	if (!vtls_random(data, (unsigned char *) &r, sizeof(r)))
+	if (!backend_random(data, (unsigned char *) &r, sizeof(r)))
 		return r;
 
 	/* If vtls_random() returns non-zero it couldn't offer randomness and we
@@ -348,316 +350,65 @@ void vtls_deinit(void)
 	}
 }
 
-int vtls_connect(struct connectdata *conn, int sockindex)
+int vtls_connect(struct vtls_session_t *sess, int sockfd)
 {
 	int result;
 
 	/* mark this is being ssl-enabled from here on. */
-	conn->ssl[sockindex].use = 1;
-	conn->ssl[sockindex].state = ssl_connection_negotiating;
+	sess->sockfd = sockfd;
+	sess->use = 1;
+	sess->state = ssl_connection_negotiating;
 
-	result = curlssl_connect(conn, sockindex);
+	result = backend_connect(sess);
 
-	if (!result)
-		Curl_pgrsTime(conn->data, TIMER_APPCONNECT); /* SSL is connected */
+//	if (!result)
+//		Curl_pgrsTime(conn->data, TIMER_APPCONNECT); /* SSL is connected */
 
 	return result;
 }
 
-int vtls_connect_nonblocking(struct connectdata *conn, int sockindex, int *done)
+int vtls_connect_nonblocking(vtls_session_t *sess, int *done)
 {
 	int result;
 	/* mark this is being ssl requested from here on. */
-	conn->ssl[sockindex].use = 1;
+	sess.use = 1;
 #ifdef curlssl_connect_nonblocking
 	result = curlssl_connect_nonblocking(conn, sockindex, done);
 #else
 	*done = 1; /* fallback to BLOCKING */
-	result = curlssl_connect(conn, sockindex);
+	result = backend_connect(sess);
 #endif /* non-blocking connect support */
-	if (!result && *done)
-		Curl_pgrsTime(conn->data, TIMER_APPCONNECT); /* SSL is connected */
+
 	return result;
 }
 
-/*
- * Check if there's a session ID for the given connection in the cache, and if
- * there's one suitable, it is provided. Returns 1 when no entry matched.
- */
-int vtls_getsessionid(struct connectdata *conn,
-	void **ssl_sessionid,
-	size_t *idsize) /* set 0 if unknown */
+void vtls_close(vtls_session_t *sess)
 {
-	struct curl_ssl_session *check;
-	struct SessionHandle *data = conn->data;
-	size_t i;
-	long *general_age;
-	int no_match = 1;
-
-	*ssl_sessionid = NULL;
-
-	if (!conn->ssl_config.sessionid)
-		/* session ID re-use is disabled */
-		return 1;
-
-	/* Lock if shared */
-	if (SSLSESSION_SHARED(data)) {
-		Curl_share_lock(data, CURL_LOCK_DATA_SSL_SESSION, CURL_LOCK_ACCESS_SINGLE);
-		general_age = &data->share->sessionage;
-	} else
-		general_age = &data->state.sessionage;
-
-	for (i = 0; i < data->set.ssl.max_ssl_sessions; i++) {
-		check = &data->state.session[i];
-		if (!check->sessionid)
-			/* not session ID means blank entry */
-			continue;
-		if (Curl_raw_equal(conn->host.name, check->name) &&
-			(conn->remote_port == check->remote_port) &&
-			vtls_config_matches(&conn->ssl_config, &check->ssl_config)) {
-			/* yes, we have a session ID! */
-			(*general_age)++; /* increase general age */
-			check->age = *general_age; /* set this as used in this age */
-			*ssl_sessionid = check->sessionid;
-			if (idsize)
-				*idsize = check->idsize;
-			no_match = 0;
-			break;
-		}
-	}
-
-	/* Unlock */
-	if (SSLSESSION_SHARED(data))
-		Curl_share_unlock(data, CURL_LOCK_DATA_SSL_SESSION);
-
-	return no_match;
+//	DEBUGASSERT((sockindex <= 1) && (sockindex >= -1));
+	backend_close(sess);
 }
 
-/*
- * Kill a single session ID entry in the cache.
- */
-void vtls_kill_session(struct curl_ssl_session *session)
+int vtls_shutdown(vtls_session_t *sess)
 {
-	if (session->sessionid) {
-		/* defensive check */
-
-		/* free the ID the SSL-layer specific way */
-		curlssl_session_free(session->sessionid);
-
-		session->sessionid = NULL;
-		session->age = 0; /* fresh */
-
-		vtls_config_free(&session->ssl_config);
-
-		xfree(session->name);
-	}
-}
-
-/*
- * Delete the given session ID from the cache.
- */
-void vtls_delsessionid(struct connectdata *conn, void *ssl_sessionid)
-{
-	size_t i;
-	struct SessionHandle *data = conn->data;
-
-	if (SSLSESSION_SHARED(data))
-		Curl_share_lock(data, CURL_LOCK_DATA_SSL_SESSION, CURL_LOCK_ACCESS_SINGLE);
-
-	for (i = 0; i < data->set.ssl.max_ssl_sessions; i++) {
-		struct curl_ssl_session *check = &data->state.session[i];
-
-		if (check->sessionid == ssl_sessionid) {
-			vtls_kill_session(check);
-			break;
-		}
-	}
-
-	if (SSLSESSION_SHARED(data))
-		Curl_share_unlock(data, CURL_LOCK_DATA_SSL_SESSION);
-}
-
-/*
- * Store session id in the session cache. The ID passed on to this function
- * must already have been extracted and allocated the proper way for the SSL
- * layer. Curl_XXXX_session_free() will be called to free/kill the session ID
- * later on.
- */
-int vtls_addsessionid(struct connectdata *conn,
-	void *ssl_sessionid,
-	size_t idsize)
-{
-	size_t i;
-	struct SessionHandle *data = conn->data; /* the mother of all structs */
-	struct curl_ssl_session *store = &data->state.session[0];
-	long oldest_age = data->state.session[0].age; /* zero if unused */
-	char *clone_host;
-	long *general_age;
-
-	/* Even though session ID re-use might be disabled, that only disables USING
-		IT. We still store it here in case the re-using is again enabled for an
-		upcoming transfer */
-
-	clone_host = strdup(conn->host.name);
-	if (!clone_host)
-		return CURLE_OUT_OF_MEMORY; /* bail out */
-
-	/* Now we should add the session ID and the host name to the cache, (remove
-		the oldest if necessary) */
-
-	/* If using shared SSL session, lock! */
-	if (SSLSESSION_SHARED(data)) {
-		Curl_share_lock(data, CURL_LOCK_DATA_SSL_SESSION, CURL_LOCK_ACCESS_SINGLE);
-		general_age = &data->share->sessionage;
-	} else {
-		general_age = &data->state.sessionage;
-	}
-
-	/* find an empty slot for us, or find the oldest */
-	for (i = 1; (i < data->set.ssl.max_ssl_sessions) &&
-		data->state.session[i].sessionid; i++) {
-		if (data->state.session[i].age < oldest_age) {
-			oldest_age = data->state.session[i].age;
-			store = &data->state.session[i];
-		}
-	}
-	if (i == data->set.ssl.max_ssl_sessions)
-		/* cache is full, we must "kill" the oldest entry! */
-		vtls_kill_session(store);
-	else
-		store = &data->state.session[i]; /* use this slot */
-
-	/* now init the session struct wisely */
-	store->sessionid = ssl_sessionid;
-	store->idsize = idsize;
-	store->age = *general_age; /* set current age */
-	if (store->name)
-		/* free it if there's one already present */
-		free(store->name);
-	store->name = clone_host; /* clone host name */
-	store->remote_port = conn->remote_port; /* port number */
-
-
-	/* Unlock */
-	if (SSLSESSION_SHARED(data))
-		Curl_share_unlock(data, CURL_LOCK_DATA_SSL_SESSION);
-
-	if (!vtls_config_clone(&conn->ssl_config, &store->ssl_config)) {
-		store->sessionid = NULL; /* let caller free sessionid */
-		free(clone_host);
-		return CURLE_OUT_OF_MEMORY;
-	}
-
-	return CURLE_OK;
-}
-
-void vtls_close_all(struct SessionHandle *data)
-{
-	size_t i;
-	/* kill the session ID cache if not shared */
-	if (data->state.session && !SSLSESSION_SHARED(data)) {
-		for (i = 0; i < data->set.ssl.max_ssl_sessions; i++)
-			/* the single-killer function handles empty table slots */
-			vtls_kill_session(&data->state.session[i]);
-
-		/* free the cache data */
-		xfree(data->state.session);
-	}
-
-	curlssl_close_all(data);
-}
-
-void vtls_close(struct connectdata *conn, int sockindex)
-{
-	DEBUGASSERT((sockindex <= 1) && (sockindex >= -1));
-	curlssl_close(conn, sockindex);
-}
-
-int vtls_shutdown(struct connectdata *conn, int sockindex)
-{
-	if (curlssl_shutdown(conn, sockindex))
+	if (backend_shutdown(sess))
 		return CURLE_SSL_SHUTDOWN_FAILED;
 
-	conn->ssl[sockindex].use = 0; /* get back to ordinary socket usage */
-	conn->ssl[sockindex].state = ssl_connection_none;
+	sess->use = 0;
+	sess->state = ssl_connection_none;
 
-	conn->recv[sockindex] = Curl_recv_plain;
-	conn->send[sockindex] = Curl_send_plain;
-
-	return CURLE_OK;
-}
-
-/* Selects an SSL crypto engine
- */
-int vtls_set_engine(struct SessionHandle *data, const char *engine)
-{
-	return curlssl_set_engine(data, engine);
-}
-
-/* Selects the default SSL crypto engine
- */
-int vtls_set_engine_default(struct SessionHandle *data)
-{
-	return curlssl_set_engine_default(data);
-}
-
-/* Return list of OpenSSL crypto engine names. */
-struct curl_slist *vtls_engines_list(struct SessionHandle *data)
-{
-	return curlssl_engines_list(data);
-}
-
-/*
- * This sets up a session ID cache to the specified size. Make sure this code
- * is agnostic to what underlying SSL technology we use.
- */
-int vtls_initsessions(struct SessionHandle *data, size_t amount)
-{
-	struct curl_ssl_session *session;
-
-	if (data->state.session)
-		/* this is just a precaution to prevent multiple inits */
-		return CURLE_OK;
-
-	session = calloc(amount, sizeof(struct curl_ssl_session));
-	if (!session)
-		return CURLE_OUT_OF_MEMORY;
-
-	/* store the info in the SSL section */
-	data->set.ssl.max_ssl_sessions = amount;
-	data->state.session = session;
-	data->state.sessionage = 1; /* this is brand new */
-	return CURLE_OK;
+	return 0;
 }
 
 size_t vtls_version(char *buffer, size_t size)
 {
-	return curlssl_version(buffer, size);
-}
-
-/*
- * This function tries to determine connection status.
- *
- * Return codes:
- *     1 means the connection is still in place
- *     0 means the connection has been closed
- *    -1 means the connection status is unknown
- */
-int vtls_check_cxn(struct connectdata *conn)
-{
-	return curlssl_check_cxn(conn);
-}
-
-int vtls_data_pending(const struct connectdata *conn,
-	int connindex)
-{
-	return curlssl_data_pending(conn, connindex);
+	return backend_version(buffer, size);
 }
 
 void vtls_free_certinfo(struct SessionHandle *data)
 {
 	int i;
-	struct curl_certinfo *ci = &data->info.certs;
+//	struct curl_certinfo *ci = &data->info.certs;
+	struct curl_certinfo *ci = NULL;
 
 	if (ci->num_of_certs) {
 		/* free all individual lists used */
@@ -674,7 +425,8 @@ void vtls_free_certinfo(struct SessionHandle *data)
 
 int vtls_init_certinfo(struct SessionHandle *data, int num)
 {
-	struct curl_certinfo *ci = &data->info.certs;
+//	struct curl_certinfo *ci = &data->info.certs;
+	struct curl_certinfo *ci = NULL;
 	struct curl_slist **table;
 
 	/* Free any previous certificate information structures */
@@ -700,7 +452,8 @@ int vtls_push_certinfo_len(struct SessionHandle *data,
 	const char *value,
 	size_t valuelen)
 {
-	struct curl_certinfo * ci = &data->info.certs;
+//	struct curl_certinfo * ci = &data->info.certs;
+	struct curl_certinfo * ci = NULL;
 	char * output;
 	struct curl_slist * nl;
 	int result = CURLE_OK;
@@ -720,7 +473,7 @@ int vtls_push_certinfo_len(struct SessionHandle *data,
 	/* zero terminate the output */
 	output[labellen + 1 + valuelen] = 0;
 
-	nl = Curl_slist_append_nodup(ci->certinfo[certnum], output);
+//	nl = Curl_slist_append_nodup(ci->certinfo[certnum], output);
 	if (!nl) {
 		free(output);
 		curl_slist_free_all(ci->certinfo[certnum]);
@@ -745,172 +498,24 @@ int vtls_push_certinfo(struct SessionHandle *data,
 	return vtls_push_certinfo_len(data, certnum, label, value, valuelen);
 }
 
-int vtls_random(struct SessionHandle *data,
-	unsigned char *entropy,
-	size_t length)
+int vtls_random(vtls_session_t *data, unsigned char *entropy, size_t length)
 {
-	return curlssl_random(data, entropy, length);
+	return backend_random(data, entropy, length);
 }
 
-/*
- * Public key pem to der conversion
- */
-
-static int pubkey_pem_to_der(const char *pem,
-	unsigned char **der, size_t *der_len)
-{
-	char *stripped_pem, *begin_pos, *end_pos;
-	size_t pem_count, stripped_pem_count = 0, pem_len;
-	int result;
-
-	/* if no pem, exit. */
-	if (!pem)
-		return CURLE_BAD_CONTENT_ENCODING;
-
-	begin_pos = strstr(pem, "-----BEGIN PUBLIC KEY-----");
-	if (!begin_pos)
-		return CURLE_BAD_CONTENT_ENCODING;
-
-	pem_count = begin_pos - pem;
-	/* Invalid if not at beginning AND not directly following \n */
-	if (0 != pem_count && '\n' != pem[pem_count - 1])
-		return CURLE_BAD_CONTENT_ENCODING;
-
-	/* 26 is length of "-----BEGIN PUBLIC KEY-----" */
-	pem_count += 26;
-
-	/* Invalid if not directly following \n */
-	end_pos = strstr(pem + pem_count, "\n-----END PUBLIC KEY-----");
-	if (!end_pos)
-		return CURLE_BAD_CONTENT_ENCODING;
-
-	pem_len = end_pos - pem;
-
-	stripped_pem = malloc(pem_len - pem_count + 1);
-	if (!stripped_pem)
-		return CURLE_OUT_OF_MEMORY;
-
-	/*
-	 * Here we loop through the pem array one character at a time between the
-	 * correct indices, and place each character that is not '\n' or '\r'
-	 * into the stripped_pem array, which should represent the raw base64 string
-	 */
-	while (pem_count < pem_len) {
-		if ('\n' != pem[pem_count] && '\r' != pem[pem_count])
-			stripped_pem[stripped_pem_count++] = pem[pem_count];
-		++pem_count;
-	}
-	/* Place the null terminator in the correct place */
-	stripped_pem[stripped_pem_count] = '\0';
-
-	result = Curl_base64_decode(stripped_pem, der, der_len);
-
-	xfree(stripped_pem);
-
-	return result;
-}
-
-/*
- * Generic pinned public key check.
- */
-
-int Curl_pin_peer_pubkey(const char *pinnedpubkey,
-	const unsigned char *pubkey, size_t pubkeylen)
-{
-	FILE *fp;
-	unsigned char *buf = NULL, *pem_ptr = NULL;
-	long filesize;
-	size_t size, pem_len;
-	int pem_read;
-	int result = CURLE_SSL_PINNEDPUBKEYNOTMATCH;
-
-	/* if a path wasn't specified, don't pin */
-	if (!pinnedpubkey)
-		return 0;
-	if (!pubkey || !pubkeylen)
-		return result;
-	fp = fopen(pinnedpubkey, "rb");
-	if (!fp)
-		return result;
-
-	do {
-		/* Determine the file's size */
-		if (fseek(fp, 0, SEEK_END))
-			break;
-		filesize = ftell(fp);
-		if (fseek(fp, 0, SEEK_SET))
-			break;
-		if (filesize < 0 || filesize > MAX_PINNED_PUBKEY_SIZE)
-			break;
-
-		/*
-		 * if the size of our certificate is bigger than the file
-		 * size then it can't match
-		 */
-		size = curlx_sotouz((curl_off_t) filesize);
-		if (pubkeylen > size)
-			break;
-
-		/*
-		 * Allocate buffer for the pinned key
-		 * With 1 additional byte for null terminator in case of PEM key
-		 */
-		buf = malloc(size + 1);
-		if (!buf)
-			break;
-
-		/* Returns number of elements read, which should be 1 */
-		if ((int) fread(buf, size, 1, fp) != 1)
-			break;
-
-		/* If the sizes are the same, it can't be base64 encoded, must be der */
-		if (pubkeylen == size) {
-			if (!memcmp(pubkey, buf, pubkeylen))
-				result = CURLE_OK;
-			break;
-		}
-
-		/*
-		 * Otherwise we will assume it's PEM and try to decode it
-		 * after placing null terminator
-		 */
-		buf[size] = '\0';
-		pem_read = pubkey_pem_to_der((const char *) buf, &pem_ptr, &pem_len);
-		/* if it wasn't read successfully, exit */
-		if (pem_read)
-			break;
-
-		/*
-		 * if the size of our certificate doesn't match the size of
-		 * the decoded file, they can't be the same, otherwise compare
-		 */
-		if (pubkeylen == pem_len && !memcmp(pubkey, pem_ptr, pubkeylen))
-			result = CURLE_OK;
-	} while (0);
-
-	xfree(buf);
-	xfree(pem_ptr);
-	fclose(fp);
-
-	return result;
-}
-
-void vtls_md5sum(unsigned char *tmp, /* input */
+int vtls_md5sum(unsigned char *tmp, /* input */
 	size_t tmplen,
 	unsigned char *md5sum, /* output */
 	size_t md5len)
 {
-#ifdef curlssl_md5sum
-	curlssl_md5sum(tmp, tmplen, md5sum, md5len);
-#else
-	MD5_context *MD5pw;
+	if (backend_md5sum(tmp, tmplen, md5sum, md5len) != 0) {
+/*		MD5_context *MD5pw;
 
-	(void) md5len;
-
-	MD5pw = Curl_MD5_init(Curl_DIGEST_MD5);
-	Curl_MD5_update(MD5pw, tmp, curlx_uztoui(tmplen));
-	Curl_MD5_final(MD5pw, md5sum);
-#endif
+		MD5pw = Curl_MD5_init(Curl_DIGEST_MD5);
+		Curl_MD5_update(MD5pw, tmp, curlx_uztoui(tmplen));
+		Curl_MD5_final(MD5pw, md5sum);
+ */
+	}
 }
 
 /*

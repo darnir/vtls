@@ -224,7 +224,8 @@ static void showtime(struct SessionHandle *data,
 	printf("%s\n", data->state.buffer);
 }
 
-static gnutls_datum_t load_file(const char *file) {
+static gnutls_datum_t load_file(const char *file)
+{
 	FILE *f;
 	gnutls_datum_t loaded_file = {NULL, 0};
 	long filelen;
@@ -249,7 +250,8 @@ out:
 	return loaded_file;
 }
 
-static void unload_file(gnutls_datum_t data) {
+static void unload_file(gnutls_datum_t data)
+{
 	free(data.data);
 }
 
@@ -257,7 +259,8 @@ static void unload_file(gnutls_datum_t data) {
 static int handshake(struct connectdata *conn,
 		  int sockindex,
 		  int duringconnect,
-		  int nonblocking) {
+		  int nonblocking)
+{
 	struct SessionHandle *data = conn->data;
 	struct ssl_connect_data *connssl = &conn->ssl[sockindex];
 	gnutls_session_t session = conn->ssl[sockindex].session;
@@ -1177,7 +1180,8 @@ static ssize_t gtls_send(struct connectdata *conn,
 }
 
 static void close_one(struct connectdata *conn,
-		  int idx) {
+		  int idx)
+{
 	if (conn->ssl[idx].session) {
 		gnutls_bye(conn->ssl[idx].session, GNUTLS_SHUT_RDWR);
 		gnutls_deinit(conn->ssl[idx].session);
@@ -1271,13 +1275,14 @@ int vtls_shutdown(struct connectdata *conn, int sockindex) {
 }
 
 static ssize_t gtls_recv(struct connectdata *conn, /* connection data */
-		  int num, /* socketindex */
+		  int sockindex, /* socketindex */
 		  char *buf, /* store read data here */
 		  size_t buffersize, /* max amount to read */
-		  int *curlcode) {
+		  int *curlcode)
+{
 	ssize_t ret;
 
-	ret = gnutls_record_recv(conn->ssl[num].session, buf, buffersize);
+	ret = gnutls_record_recv(conn->ssl[sockindex].session, buf, buffersize);
 	if ((ret == GNUTLS_E_AGAIN) || (ret == GNUTLS_E_INTERRUPTED)) {
 		*curlcode = CURLE_AGAIN;
 		return -1;
@@ -1286,7 +1291,7 @@ static ssize_t gtls_recv(struct connectdata *conn, /* connection data */
 	if (ret == GNUTLS_E_REHANDSHAKE) {
 		/* BLOCKING call, this is bad but a work-around for now. Fixing this "the
 			proper way" takes a whole lot of work. */
-		int result = handshake(conn, num, 0, 0);
+		int result = handshake(conn, sockindex, 0, 0);
 		if (result)
 			/* handshake() writes error message on its own */
 			*curlcode = result;
@@ -1340,15 +1345,16 @@ static int vtls_seed(struct SessionHandle *data) {
 /* data might be NULL! */
 int vtls_random(struct SessionHandle *data,
 		  unsigned char *entropy,
-		  size_t length) {
+		  size_t length)
+{
 #if defined(USE_GNUTLS_NETTLE)
 	(void) data;
 	gnutls_rnd(GNUTLS_RND_RANDOM, entropy, length);
-#elif defined(USE_GNUTLS)
+	return 0;
+#endif
 	if (data)
 		vtls_seed(data); /* Initiate the seed if not already done */
 	gcry_randomize(entropy, length, GCRY_STRONG_RANDOM);
-#endif
 	return 0;
 }
 
