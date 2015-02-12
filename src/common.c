@@ -23,6 +23,7 @@
  */
 
 #include <sys/types.h>
+#include "common.h"
 
 static const char _lower[256] = {
 	['a'] = 'a', ['b'] = 'b', ['c'] = 'c', ['d'] = 'd',

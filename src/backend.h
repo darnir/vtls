@@ -2,6 +2,7 @@
 #define _VTLS_BACKEND_H
 
 #include <vtls.h>
+#include <errno.h>
 
 /* Set the API backend definition to GnuTLS */
 #define CURL_SSL_BACKEND CURLSSLBACKEND_GNUTLS
@@ -31,6 +32,7 @@ struct _vtls_config_st {
 	const char *cipher_list; /* list of ciphers to use */
 	const char *username; /* TLS username (for, e.g., SRP) */
 	const char *password; /* TLS password (for, e.g., SRP) */
+	int connect_timeout; /* connection timeout in ms */
 	enum CURL_TLSAUTH authtype; /* TLS authentication type (default SRP) */
 	char version; /* what TLS version the client wants to use */
 	char verifypeer; /* if peer verification is requested */
@@ -40,8 +42,8 @@ struct _vtls_config_st {
 
 struct _vtls_session_st {
 	const vtls_config_t *config;
-	const char *hostname;
-	void *ssl_session;
+	const char *hostname; /* SNI hostname */
+	void *backend_data;
 	int sockfd;
 	int use;
 	int state;
@@ -60,6 +62,8 @@ struct _vtls_session_st {
 int backend_get_engine(void);
 int backend_init(vtls_config_t *config);
 int backend_deinit(void);
+int backend_session_init(vtls_session_t *sess);
+void backend_session_deinit(vtls_session_t *sess);
 int backend_connect_nonblocking(vtls_session_t *sess, int *done);
 int backend_connect(vtls_session_t *sess);
 void backend_close(vtls_session_t *sess);

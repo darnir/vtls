@@ -124,6 +124,7 @@ int main(int argc, const char *const *argv)
 		VTLS_CFG_EGD_SOCKET, NULL,
 		VTLS_CFG_CIPHER_LIST, NULL,
 		VTLS_CFG_LOCK_CALLBACK, NULL,
+		VTLS_CFG_CONNECT_TIMEOUT, 30*1000,
 		NULL))
 	{
 		fprintf(stderr, "Failed to init default config\n");
@@ -160,6 +161,7 @@ int main(int argc, const char *const *argv)
 		return 1;
 	}
 
+	vtls_config_deinit(default_config);
 	vtls_session_deinit(&sess);
 	vtls_deinit();
 

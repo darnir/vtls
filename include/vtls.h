@@ -234,6 +234,7 @@ enum {
 	VTLS_CFG_EGD_SOCKET,
 	VTLS_CFG_CIPHER_LIST,
 	VTLS_CFG_LOCK_CALLBACK,
+	VTLS_CFG_CONNECT_TIMEOUT,
 	VTLS_CFG_LAST
 };
 
@@ -251,8 +252,9 @@ void vtls_deinit(void);
 
 int vtls_session_init(vtls_session_t **sess, vtls_config_t *config);
 void vtls_session_deinit(vtls_session_t *sess);
+int vtls_get_engine(void);
+size_t vtls_version(char *buffer, size_t size);
 
-int vtls_backend(void);
 int vtls_connect(vtls_session_t *sess, int sockfd, const char *hostname);
 int vtls_connect_nonblocking(vtls_session_t *sess, int sockfd, int *done);
 /* tell the SSL stuff to close down all open information regarding

@@ -31,6 +31,7 @@
 // #include "curl_setup.h"
 
 #include <unistd.h>
+#include <arpa/inet.h>
 
 #include <gnutls/abstract.h>
 #include <gnutls/gnutls.h>
@@ -78,12 +79,17 @@
 /*#define GTLSDEBUG */
 
 #ifdef GTLSDEBUG
-
 static void tls_log_func(int level, const char *str)
 {
 	fprintf(stderr, "|<%d>| %s", level, str);
 }
 #endif
+
+static struct backend_session_data {
+	gnutls_session_t *session;
+	gnutls_certificate_credentials_t *cred;
+	gnutls_certificate_credentials_t *srp_client_cred;
+};
 static int _init_backend = 0;
 
 #if defined(GNUTLS_VERSION_NUMBER)
@@ -210,6 +216,19 @@ int backend_deinit(void)
 	return 0;
 }
 
+int backend_session_init(vtls_session_t *sess)
+{
+	if ((sess->backend_data = calloc(1, sizeof(struct backend_session_data))))
+		return -2;
+
+	return 0;
+}
+
+void backend_session_deinit(vtls_session_t *sess)
+{
+	xfree(sess->backend_data);
+}
+
 /*
 static void showtime(struct SessionHandle *data,
 	const char *text,
@@ -273,11 +292,11 @@ static int handshake(vtls_session_t *sess,
 	int duringconnect,
 	int nonblocking)
 {
-	gnutls_session_t session = sess->ssl_session;
+	struct backend_session_data *backend = sess->backend_data;
+	gnutls_session_t *session = backend->session;
 	int sockfd = sess->sockfd;
 	long timeout_ms;
 	int rc;
-	int what;
 
 	for (;;) {
 		/* check allowed time left */
@@ -291,14 +310,13 @@ static int handshake(vtls_session_t *sess,
 
 		/* if ssl is expecting something, check if it's available. */
 		if (sess->connecting_state == ssl_connect_2_reading
-			|| sess->connecting_state == ssl_connect_2_writing) {
-
+			|| sess->connecting_state == ssl_connect_2_writing)
+		{
 			int writefd = ssl_connect_2_writing == sess->connecting_state ? sockfd : -1;
 			int readfd = ssl_connect_2_reading == sess->connecting_state ? sockfd : -1;
+			int what = Curl_socket_ready(readfd, writefd,
+				nonblocking ? 0 : timeout_ms ? timeout_ms : 1000);
 
-			what = Curl_socket_ready(readfd, writefd,
-				nonblocking ? 0 :
-				timeout_ms ? timeout_ms : 1000);
 			if (what < 0) {
 				/* fatal error */
 				printf("select/poll on SSL socket, errno: %d", SOCKERRNO);
@@ -370,9 +388,9 @@ static int
 gtls_connect_step1(vtls_session_t *sess)
 {
 //	struct SessionHandle *data = conn->data;
-	gnutls_session_t session;
+	struct backend_session_data *backend = sess->backend_data;
+	gnutls_session_t session = backend->session;
 	int rc;
-	void *ssl_sessionid;
 	size_t ssl_idsize;
 	int sni = 1; /* default is SNI enabled */
 #ifdef ENABLE_IPV6
@@ -422,7 +440,7 @@ gtls_connect_step1(vtls_session_t *sess)
 		sni = 0; /* SSLv3 has no SNI */
 
 	/* allocate a cred struct */
-	rc = gnutls_certificate_allocate_credentials(&sess->cred);
+	rc = gnutls_certificate_allocate_credentials(&backend->cred);
 	if (rc != GNUTLS_E_SUCCESS) {
 		printf("gnutls_cert_all_cred() failed: %s", gnutls_strerror(rc));
 		return CURLE_SSL_CONNECT_ERROR;
@@ -450,9 +468,9 @@ gtls_connect_step1(vtls_session_t *sess)
 
 	if (sess->config->CAfile) {
 		/* set the trusted CA cert bundle file */
-		gnutls_certificate_set_verify_flags(sess->cred, GNUTLS_VERIFY_ALLOW_X509_V1_CA_CRT);
+		gnutls_certificate_set_verify_flags(backend->cred, GNUTLS_VERIFY_ALLOW_X509_V1_CA_CRT);
 
-		rc = gnutls_certificate_set_x509_trust_file(sess->cred, sess->config->CAfile, GNUTLS_X509_FMT_PEM);
+		rc = gnutls_certificate_set_x509_trust_file(backend->cred, sess->config->CAfile, GNUTLS_X509_FMT_PEM);
 		if (rc < 0) {
 			printf("error reading ca cert file %s (%s)\n", sess->config->CAfile, gnutls_strerror(rc));
 			if (sess->config->verifypeer)
@@ -463,7 +481,7 @@ gtls_connect_step1(vtls_session_t *sess)
 
 	if (sess->config->CRLfile) {
 		/* set the CRL list file */
-		rc = gnutls_certificate_set_x509_crl_file(sess->cred, sess->config->CRLfile, GNUTLS_X509_FMT_PEM);
+		rc = gnutls_certificate_set_x509_crl_file(backend->cred, sess->config->CRLfile, GNUTLS_X509_FMT_PEM);
 		if (rc < 0) {
 			printf("error reading crl file %s (%s)",
 				sess->config->CRLfile, gnutls_strerror(rc));
@@ -473,23 +491,21 @@ gtls_connect_step1(vtls_session_t *sess)
 	}
 
 	/* Initialize TLS session as a client */
-	rc = gnutls_init(&sess->ssl_session, GNUTLS_CLIENT);
+	rc = gnutls_init(&session, GNUTLS_CLIENT);
 	if (rc != GNUTLS_E_SUCCESS) {
 		printf("gnutls_init() failed: %d", rc);
 		return CURLE_SSL_CONNECT_ERROR;
 	}
 
-	/* convenient assign */
-	session = sess->ssl_session;
-
-	if ((0 == Curl_inet_pton(AF_INET, conn->host.name, &addr)) &&
+	if (Curl_inet_pton(AF_INET, sess->hostname, &addr) == 0 &&
 #ifdef ENABLE_IPV6
-		(0 == Curl_inet_pton(AF_INET6, conn->host.name, &addr)) &&
+		(Curl_inet_pton(AF_INET6, sess->hostname, &addr) == 0 &&
 #endif
 		sni &&
-		(gnutls_server_name_set(session, GNUTLS_NAME_DNS, sess->hostname,
-		strlen(sess->hostname)) < 0))
+		gnutls_server_name_set(session, GNUTLS_NAME_DNS, sess->hostname, strlen(sess->hostname)) < 0)
+	{
 		printf("WARNING: failed to configure server name indication (SNI) TLS extension\n");
+	}
 
 	/* Use default priorities */
 	rc = gnutls_set_default_priority(session);
@@ -617,7 +633,7 @@ gtls_connect_step1(vtls_session_t *sess)
 #endif
 
 	if (sess->CERTfile) {
-		if (gnutls_certificate_set_x509_key_file(sess->cred,
+		if (gnutls_certificate_set_x509_key_file(backend->cred,
 			sess->config->CERTfile,
 			sess->config->KEYfile ? sess->config->KEYfile : sess->config->CERTfile,
 			do_file_type(sess->config->cert_type])) != GNUTLS_E_SUCCESS)
@@ -635,7 +651,7 @@ gtls_connect_step1(vtls_session_t *sess)
 			printf("gnutls_credentials_set() failed: %s", gnutls_strerror(rc));
 	} else
 #endif
-		rc = gnutls_credentials_set(session, GNUTLS_CRD_CERTIFICATE, sess->cred);
+		rc = gnutls_credentials_set(session, GNUTLS_CRD_CERTIFICATE, backend->cred);
 
 	/* set the connection handle (file descriptor for the socket) */
 	gnutls_transport_set_ptr(session, GNUTLS_INT_TO_POINTER_CAST(sess->sockfd));
@@ -727,9 +743,6 @@ static int pkp_pin_peer_pubkey(gnutls_x509_crt_t cert,
 	return result;
 }
 
-static Curl_recv gtls_recv;
-static Curl_send gtls_send;
-
 static int gtls_connect_step3(vtls_session_t *sess)
 {
 	unsigned int cert_list_size;
@@ -743,8 +756,8 @@ static int gtls_connect_step3(vtls_session_t *sess)
 	unsigned int bits;
 	time_t certclock;
 	const char *ptr;
-//	struct SessionHandle *data = conn->data;
-	gnutls_session_t session = sess->ssl_session;
+	struct backend_session_data *backend = sess->backend_data;
+	gnutls_session_t session = backend->session;
 	int rc;
 	int incache;
 	void *ssl_sessionid;
@@ -1047,6 +1060,7 @@ static int gtls_connect_step3(vtls_session_t *sess)
 //	conn->recv[sockindex] = gtls_recv;
 //	conn->send[sockindex] = gtls_send;
 
+#ifdef unsused_code
 	{
 		/* we always unconditionally get the session id here, as even if we
 			already got it from the cache and asked to use it in the connection, it
@@ -1079,6 +1093,7 @@ static int gtls_connect_step3(vtls_session_t *sess)
 		} else
 			result = CURLE_OUT_OF_MEMORY;
 	}
+#endif
 
 	return result;
 }
@@ -1146,7 +1161,9 @@ ssize_t backend_read(vtls_session_t *sess,
 	size_t len,
 	int *curlcode)
 {
-	ssize_t rc = gnutls_record_send(sess->ssl_session, mem, len);
+	struct backend_session_data *backend = sess->backend_data;
+	gnutls_session_t session = backend->session;
+	ssize_t rc = gnutls_record_send(session, mem, len);
 
 	if (rc < 0) {
 		*curlcode = (rc == GNUTLS_E_AGAIN)
@@ -1159,22 +1176,24 @@ ssize_t backend_read(vtls_session_t *sess,
 	return rc;
 }
 
-static void close_one(vtls_session_t *sess,
-	int idx)
+static void close_one(vtls_session_t *sess, int idx)
 {
-	if (sess->ssl_session) {
-		gnutls_bye(sess->ssl_session, GNUTLS_SHUT_RDWR);
-		gnutls_deinit(sess->ssl_session);
-		sess->ssl_session = NULL;
+	struct backend_session_data *backend = sess->backend_data;
+	gnutls_session_t session = backend->session;
+
+	if (session) {
+		gnutls_bye(session, GNUTLS_SHUT_RDWR);
+		gnutls_deinit(session);
+		backend->session = NULL;
 	}
-	if (sess->cred) {
-		gnutls_certificate_free_credentials(sess->cred);
-		sess->cred = NULL;
+	if (backend->cred) {
+		gnutls_certificate_free_credentials(backend->cred);
+		backend->cred = NULL;
 	}
 #ifdef USE_TLS_SRP
-	if (sess->srp_client_cred) {
-		gnutls_srp_free_client_credentials(sess->srp_client_cred);
-		sess->srp_client_cred = NULL;
+	if (backend->srp_client_cred) {
+		gnutls_srp_free_client_credentials(backend->srp_client_cred);
+		backend->srp_client_cred = NULL;
 	}
 #endif
 }
@@ -1190,6 +1209,8 @@ void backend_close(vtls_session_t *sess)
  */
 int backend_shutdown(vtls_session_t *sess)
 {
+	struct backend_session_data *backend = sess->backend_data;
+	gnutls_session_t session = backend->session;
 	ssize_t result;
 	int retval = 0;
 //	struct SessionHandle *data = conn->data;
@@ -1201,16 +1222,16 @@ int backend_shutdown(vtls_session_t *sess)
 		response. Thus we wait for a close notify alert from the server, but
 		we do not send one. Let's hope other servers do the same... */
 
-	if (data->set.ftp_ccc == CURLFTPSSL_CCC_ACTIVE)
-		gnutls_bye(sess->ssl_session, GNUTLS_SHUT_WR);
+//	if (data->set.ftp_ccc == CURLFTPSSL_CCC_ACTIVE)
+//		gnutls_bye(sess->ssl_session, GNUTLS_SHUT_WR);
 
-	if (sess->ssl_session) {
+	if (backend->session) {
 		while (!done) {
 			int what = Curl_socket_ready(sess->sockfd, CURL_SOCKET_BAD, SSL_SHUTDOWN_TIMEOUT);
 			if (what > 0) {
 				/* Something to read, let's do it and hope that it is the close
 					notify alert from the server */
-				result = gnutls_record_recv(sess->ssl_session, buf, sizeof(buf));
+				result = gnutls_record_recv(backend->session, buf, sizeof(buf));
 				switch (result) {
 				case 0:
 					/* This is the expected response. There was no data but only
@@ -1238,16 +1259,18 @@ int backend_shutdown(vtls_session_t *sess)
 				done = 1;
 			}
 		}
-		gnutls_deinit(sess->ssl_session);
-		sess->ssl_session = NULL;
+		gnutls_deinit(backend->session);
+		backend->session = NULL;
 	}
 
-	gnutls_certificate_free_credentials(sess->cred);
-	sess->cred = NULL;
+	gnutls_certificate_free_credentials(backend->cred);
+	backend->cred = NULL;
 
 #ifdef USE_TLS_SRP
-	if (sess->config->authtype == CURL_TLSAUTH_SRP && sess->config->username)
-		gnutls_srp_free_client_credentials(sess->srp_client_cred);
+	if (sess->config->authtype == CURL_TLSAUTH_SRP && sess->config->username) {
+		gnutls_srp_free_client_credentials(backend->srp_client_cred);
+		backend->srp_client_cred = NULL;
+	}
 #endif
 
 	return retval;

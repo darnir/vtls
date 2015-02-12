@@ -95,6 +95,7 @@ static const struct _vtls_config_st _default_config_static = {
 	NULL, /* cipher_list; list of ciphers to use */
 	NULL, /* username: TLS username (for, e.g., SRP) */
 	NULL, /* password: TLS password (for, e.g., SRP) */
+	10*1000, /* connect timeout in ms */
 	CURL_TLSAUTH_NONE, /* TLS authentication type (default NONE) */
 	CURL_SSLVERSION_TLSv1_0,	/* version: what TLS version the client wants to use */
 	1, /* verifypeer: if peer verification is requested */
@@ -283,6 +284,8 @@ void vtls_deinit(void)
 
 int vtls_session_init(vtls_session_t **sess, vtls_config_t *config)
 {
+	int ret;
+
 	if (!sess)
 		return -1;
 
@@ -291,11 +294,15 @@ int vtls_session_init(vtls_session_t **sess, vtls_config_t *config)
 
 	(*sess)->config = config ? config : _default_config;
 
-	return 0;
+	if ((ret = backend_session_init(*sess)))
+		vtls_session_deinit(*sess);
+
+	return ret;
 }
 
 void vtls_session_deinit(vtls_session_t *sess)
 {
+	backend_session_deinit(sess);
 	xfree(sess->hostname);
 	xfree(sess);
 }
