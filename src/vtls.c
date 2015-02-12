@@ -49,11 +49,15 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <string.h>
+#include <stdarg.h>
 
 // #include "urldata.h"
 
 #include <vtls.h> /* generic SSL protos etc */
+#include "common.h"
 #include "timeval.h"
+#include "backend.h"
 
 /*
 #include "slist.h"
@@ -80,242 +84,154 @@
                                  (data->share->specifier &             \
                                   (1<<CURL_LOCK_DATA_SSL_SESSION)))
 
-#define xfree(a) do { if (a) { free((void *)(a)); a = NULL; } } while (0)
-
-static const char _lower[256] = {
-	['a'] = 'a', ['b'] = 'b', ['c'] = 'c', ['d'] = 'd',
-	['e'] = 'e', ['f'] = 'f', ['g'] = 'g', ['h'] = 'h',
-	['i'] = 'i', ['j'] = 'j', ['k'] = 'k', ['l'] = 'l',
-	['m'] = 'm', ['n'] = 'n', ['o'] = 'o', ['p'] = 'p',
-	['q'] = 'q', ['r'] = 'r', ['s'] = 's', ['t'] = 't',
-	['u'] = 'u', ['v'] = 'v', ['w'] = 'w', ['x'] = 'x',
-	['y'] = 'y', ['z'] = 'z', ['A'] = 'a', ['B'] = 'b',
-	['C'] = 'c', ['D'] = 'd', ['E'] = 'e', ['F'] = 'f',
-	['G'] = 'g', ['H'] = 'h', ['I'] = 'i', ['J'] = 'j',
-	['K'] = 'k', ['L'] = 'l', ['M'] = 'm', ['N'] = 'n',
-	['O'] = 'o', ['P'] = 'p', ['Q'] = 'q', ['R'] = 'r',
-	['S'] = 's', ['T'] = 't', ['U'] = 'u', ['V'] = 'v',
-	['W'] = 'w', ['X'] = 'x', ['Y'] = 'y', ['Z'] = 'z',
+static const struct _vtls_config_st _default_config_static = {
+	NULL, /* lock_callback: callback function for multithread library use */
+	NULL, /* CApath: certificate directory (doesn't work on windows) */
+	NULL, /* CAfile: certificate to verify peer against */
+	NULL, /* CRLfile; CRL to check certificate revocation */
+	NULL, /* issuercert: optional issuer certificate filename */
+	NULL, /* random_file: path to file containing "random" data */
+	NULL, /* egdsocket; path to file containing the EGD daemon socket */
+	NULL, /* cipher_list; list of ciphers to use */
+	NULL, /* username: TLS username (for, e.g., SRP) */
+	NULL, /* password: TLS password (for, e.g., SRP) */
+	CURL_TLSAUTH_NONE, /* TLS authentication type (default NONE) */
+	CURL_SSLVERSION_TLSv1_0,	/* version: what TLS version the client wants to use */
+	1, /* verifypeer: if peer verification is requested */
+	1, /* verifyhost: if hostname matching is requested */
+	1  /* verifystatus: if certificate status check is requested */
 };
+static const vtls_config_t *_default_config;
 
-/**
- * vtls_strcasecmp_ascii:
- * @s1: String
- * @s2: String
- *
- * This functions compares @s1 and @s2 case insensitive ignoring locale settings.
- * It also accepts %NULL values.
- *
- * It returns 0 if both @s1 and @s2 are the same disregarding case for ASCII letters a-z.
- * It returns 0 if both @s1 and @s2 are %NULL.
- * It returns <0 if @s1 is %NULL and @s2 is not %NULL or s1 is smaller than s2.
- * It returns >0 if @s2 is %NULL and @s1 is not %NULL or s1 is greater than s2.
- *
- * Returns: An integer value described above.
- */
-int vtls_strcasecmp_ascii(const char *s1, const char *s2)
+#define FETCH_AND_DUP(s) \
+	if (((*config)->s = va_arg(args, const char *))) {\
+		(*config)->s = strdup((*config)->s);\
+		if (!(*config)->s)\
+			return -2;\
+	}
+
+int vtls_config_init(vtls_config_t **config, ...)
 {
-	if (!s1) {
-		if (!s2)
-			return 0;
-		else
-			return -1;
-	} else {
-		if (!s2)
-			return 1;
-		else {
-			while (*s1 && (*s1 == *s2 || (_lower[(unsigned)*s1] && _lower[(unsigned)*s1] == _lower[(unsigned)*s2]))) {
-				s1++;
-				s2++;
-			}
+	va_list args;
+	int key;
 
-			if (*s1 || *s2)
-				return *s1 - *s2;
+	if (!config)
+		return -1;
 
-			return 0;
+	if (!(*config = malloc(sizeof(**config))))
+		return -2;
+
+	// copy default values
+	memcpy(*config, &_default_config_static, sizeof(_default_config_static));
+
+	va_start(args, config);
+	for (key = va_arg(args, int); key; key = va_arg(args, int)) {
+		switch (key) {
+		case VTLS_CFG_TLS_VERSION:
+			(*config)->version = va_arg(args, int);
+			break;
+		case VTLS_CFG_VERIFY_PEER:
+			(*config)->verifypeer = va_arg(args, int);
+			break;
+		case VTLS_CFG_VERIFY_HOST:
+			(*config)->verifyhost = va_arg(args, int);
+			break;
+		case VTLS_CFG_VERIFY_STATUS:
+			(*config)->verifystatus = va_arg(args, int);
+			break;
+		case VTLS_CFG_CA_PATH:
+			FETCH_AND_DUP(CApath);
+			break;
+		case VTLS_CFG_CA_FILE:
+			FETCH_AND_DUP(CAfile);
+			break;
+		case VTLS_CFG_CRL_FILE:
+			FETCH_AND_DUP(CRLfile);
+			break;
+		case VTLS_CFG_ISSUER_FILE:
+			FETCH_AND_DUP(issuercert);
+			break;
+		case VTLS_CFG_RANDOM_FILE:
+			FETCH_AND_DUP(random_file);
+			break;
+		case VTLS_CFG_EGD_SOCKET:
+			FETCH_AND_DUP(egdsocket);
+			break;
+		case VTLS_CFG_CIPHER_LIST:
+			FETCH_AND_DUP(cipher_list);
+			break;
+		case VTLS_CFG_LOCK_CALLBACK:
+			(*config)->lock_callback = va_arg(args, void(*)(int));
+			break;
+		default:
+			/* unknown key */
+			vtls_config_free(*config);
+			return -3;
 		}
 	}
+	va_end(args);
+
+	return 0;
 }
+#undef FETCH_AND_DUP
 
-/**
- * vtls_strncasecmp_ascii:
- * @s1: String
- * @s2: String
- * @n: Max. number of chars to compare
- *
- * This functions compares @s1 and @s2 case insensitive ignoring locale settings up to a max number of @n chars.
- * It also accepts %NULL values.
- *
- * It returns 0 if both @s1 and @s2 are the same disregarding case for ASCII letters a-z.
- * It returns 0 if both @s1 and @s2 are %NULL.
- * It returns <0 if @s1 is %NULL and @s2 is not %NULL or s1 is smaller than s2.
- * It returns >0 if @s2 is %NULL and @s1 is not %NULL or s1 is greater than s2.
- *
- * Returns: An integer value described above.
- */
-int vtls_strncasecmp_ascii(const char *s1, const char *s2, size_t n)
+int vtls_config_matches(const vtls_config_t *data, const vtls_config_t *needle)
 {
-	if (!s1) {
-		if (!s2)
-			return 0;
-		else
-			return -1;
-	} else {
-		if (!s2)
-			return 1;
-		else {
-			while ((ssize_t)(n--) > 0 && *s1 && (*s1 == *s2 || (_lower[(unsigned)*s1] && _lower[(unsigned)*s1] == _lower[(unsigned)*s2]))) {
-				s1++;
-				s2++;
-			}
-
-			if ((ssize_t)n >= 0 && (*s1 || *s2))
-				return *s1 - *s2;
-
-			return 0;
-		}
-	}
-}
-
-static int safe_strequal(const char* str1, const char* str2)
-{
-	return vtls_strncasecmp_ascii(str1, str2) == 0;
-}
-
-int vtls_config_matches(const ssl_config_data_t data, const ssl_config_data_t needle)
-{
-	return
-	((data->version == needle->version) &&
+	return ((data->version == needle->version) &&
 		(data->verifypeer == needle->verifypeer) &&
 		(data->verifyhost == needle->verifyhost) &&
-		safe_strequal(data->CApath, needle->CApath) &&
-		safe_strequal(data->CAfile, needle->CAfile) &&
-		safe_strequal(data->random_file, needle->random_file) &&
-		safe_strequal(data->egdsocket, needle->egdsocket) &&
-		safe_strequal(data->cipher_list, needle->cipher_list));
+		vtls_strcaseequal_ascii(data->CApath, needle->CApath) &&
+		vtls_strcaseequal_ascii(data->CAfile, needle->CAfile) &&
+		vtls_strcaseequal_ascii(data->random_file, needle->random_file) &&
+		vtls_strcaseequal_ascii(data->egdsocket, needle->egdsocket) &&
+		vtls_strcaseequal_ascii(data->cipher_list, needle->cipher_list));
 }
 
-int vtls_config_clone(
-	struct ssl_config_data *source,
-	struct ssl_config_data *dest)
+#define DUP_MEMBER(s) \
+	if (src->s) {\
+		(*dst)->s = strdup(src->s);\
+		if (!(*dst)->s)\
+			return -2;\
+	}
+
+int vtls_config_clone(const vtls_config_t *src, vtls_config_t **dst)
 {
-	dest->sessionid = source->sessionid;
-	dest->verifyhost = source->verifyhost;
-	dest->verifypeer = source->verifypeer;
-	dest->version = source->version;
+	if (!dst)
+		return -1;
 
-	if (source->CAfile) {
-		dest->CAfile = strdup(source->CAfile);
-		if (!dest->CAfile)
-			return 0;
-	} else
-		dest->CAfile = NULL;
+	if (!(*dst = calloc(1, sizeof(**dst))))
+		return -2;
 
-	if (source->CApath) {
-		dest->CApath = strdup(source->CApath);
-		if (!dest->CApath)
-			return 0;
-	} else
-		dest->CApath = NULL;
+	// copy config values
+	memcpy(*dst, src, sizeof(*src));
 
-	if (source->cipher_list) {
-		dest->cipher_list = strdup(source->cipher_list);
-		if (!dest->cipher_list)
-			return 0;
-	} else
-		dest->cipher_list = NULL;
+	/* and dup the strings */
+	DUP_MEMBER(CAfile);
+	DUP_MEMBER(CApath);
+	DUP_MEMBER(CRLfile);
+	DUP_MEMBER(issuercert);
+	DUP_MEMBER(random_file);
+	DUP_MEMBER(egdsocket);
+	DUP_MEMBER(cipher_list);
 
-	if (source->egdsocket) {
-		dest->egdsocket = strdup(source->egdsocket);
-		if (!dest->egdsocket)
-			return 0;
-	} else
-		dest->egdsocket = NULL;
-
-	if (source->random_file) {
-		dest->random_file = strdup(source->random_file);
-		if (!dest->random_file)
-			return 0;
-	} else
-		dest->random_file = NULL;
-
-	return 1;
+	return 0;
 }
+#undef DUP_MEMBER
 
-void vtls_config_free(struct ssl_config_data* sslc)
+void vtls_config_free(vtls_config_t *config)
 {
-	xfree(sslc->CAfile);
-	xfree(sslc->CApath);
-	xfree(sslc->cipher_list);
-	xfree(sslc->egdsocket);
-	xfree(sslc->random_file);
-}
+	if (!config || config == &_default_config_static)
+		return;
 
-/*
- * Curl_rand() returns a random unsigned integer, 32bit.
- *
- * This non-SSL function is put here only because this file is the only one
- * with knowledge of what the underlying SSL libraries provide in terms of
- * randomizers.
- *
- * NOTE: 'data' may be passed in as NULL when coming from external API without
- * easy handle!
- *
- */
-
-unsigned int vtls_rand(struct SessionHandle *data, int force_entropy, const char *random_file)
-{
-	unsigned int r = 0;
-	static unsigned int randseed;
-	static int seeded = 0;
-
-	if (force_entropy) {
-		if (!seeded) {
-			size_t elen = strlen(force_entropy);
-			size_t clen = sizeof(randseed);
-			size_t min = elen < clen ? elen : clen;
-			memcpy((char *) &randseed, force_entropy, min);
-			seeded = 1;
-		} else
-			randseed++;
-
-		return randseed;
-	}
-
-	/* data may be NULL! */
-	if (!backend_random(data, (unsigned char *) &r, sizeof(r)))
-		return r;
-
-	/* If vtls_random() returns non-zero it couldn't offer randomness and we
-		instead perform a "best effort" */
-
-	if (random_file) {
-		if (!seeded) {
-			/* if there's a random file to read a seed from, use it */
-			int fd = open(random_file, O_RDONLY);
-			if (fd > -1) {
-				/* read random data into the randseed variable */
-				ssize_t nread = read(fd, &randseed, sizeof(randseed));
-				if (nread == sizeof(randseed))
-					seeded = 1;
-				close(fd);
-			}
-		}
-	}
-
-	if (!seeded) {
-		struct timeval now = curlx_tvnow();
-		printf("WARNING: Using weak random seed\n");
-		randseed += (unsigned int) now.tv_usec + (unsigned int) now.tv_sec;
-		randseed = randseed * 1103515245 + 12345;
-		randseed = randseed * 1103515245 + 12345;
-		randseed = randseed * 1103515245 + 12345;
-		seeded = 1;
-	}
-
-	/* Return an unsigned 32-bit pseudo-random number. */
-	r = randseed = randseed * 1103515245 + 12345;
-	return(r << 16) | ((r >> 16) & 0xFFFF);
+	xfree(config->CAfile);
+	xfree(config->CApath);
+	xfree(config->CRLfile);
+	xfree(config->cipher_list);
+	xfree(config->egdsocket);
+	xfree(config->random_file);
+	xfree(config->username);
+	xfree(config->password);
+	xfree(config);
 }
 
 int vtls_get_engine(void)
@@ -329,16 +245,31 @@ static int _init_vtls = 0;
 /**
  * Global SSL init
  *
- * @retval 0 error initializing SSL
- * @retval 1 SSL initialized successfully
+ * @retval 0 SSL initialized successfully
+ * @retval 1 error initializing SSL
  */
-int vtls_init(void)
+int vtls_init(vtls_config_t *config)
 {
+	int ret;
+
+	if (config && config->lock_callback)
+		config->lock_callback(1);
+
 	/* make sure this is only done once */
 	if (_init_vtls++)
 		return 1;
 
-	return backend_init();
+	if (config)
+		_default_config = config;
+	else
+		_default_config = &_default_config_static;
+
+	ret = backend_init(config);
+
+	if (config && config->lock_callback)
+		config->lock_callback(0);
+
+	return ret;
 }
 
 /* Global cleanup */
@@ -350,41 +281,38 @@ void vtls_deinit(void)
 	}
 }
 
-int vtls_connect(struct vtls_session_t *sess, int sockfd)
+int vtls_session_init(vtls_session_t **sess, vtls_config_t *config)
 {
-	int result;
+	if (!sess)
+		return -1;
 
-	/* mark this is being ssl-enabled from here on. */
-	sess->sockfd = sockfd;
-	sess->use = 1;
-	sess->state = ssl_connection_negotiating;
+	if (!(*sess = calloc(1, sizeof(**sess))))
+		return -2;
 
-	result = backend_connect(sess);
+	(*sess)->config = config ? config : _default_config;
 
-//	if (!result)
-//		Curl_pgrsTime(conn->data, TIMER_APPCONNECT); /* SSL is connected */
-
-	return result;
+	return 0;
 }
 
-int vtls_connect_nonblocking(vtls_session_t *sess, int *done)
+void vtls_session_deinit(vtls_session_t *sess)
 {
-	int result;
-	/* mark this is being ssl requested from here on. */
-	sess.use = 1;
-#ifdef curlssl_connect_nonblocking
-	result = curlssl_connect_nonblocking(conn, sockindex, done);
-#else
-	*done = 1; /* fallback to BLOCKING */
-	result = backend_connect(sess);
-#endif /* non-blocking connect support */
+	xfree(sess->hostname);
+	xfree(sess);
+}
 
-	return result;
+int vtls_connect(vtls_session_t *sess, int sockfd, const char *hostname)
+{
+	/* mark this is being ssl-enabled from here on. */
+	sess->use = 1;
+	sess->state = ssl_connection_negotiating;
+	sess->sockfd = sockfd;
+	sess->hostname = strdup(hostname);
+
+	return backend_connect(sess);
 }
 
 void vtls_close(vtls_session_t *sess)
 {
-//	DEBUGASSERT((sockindex <= 1) && (sockindex >= -1));
 	backend_close(sess);
 }
 
@@ -404,111 +332,14 @@ size_t vtls_version(char *buffer, size_t size)
 	return backend_version(buffer, size);
 }
 
-void vtls_free_certinfo(struct SessionHandle *data)
-{
-	int i;
-//	struct curl_certinfo *ci = &data->info.certs;
-	struct curl_certinfo *ci = NULL;
-
-	if (ci->num_of_certs) {
-		/* free all individual lists used */
-		for (i = 0; i < ci->num_of_certs; i++) {
-			curl_slist_free_all(ci->certinfo[i]);
-			ci->certinfo[i] = NULL;
-		}
-
-		free(ci->certinfo); /* free the actual array too */
-		ci->certinfo = NULL;
-		ci->num_of_certs = 0;
-	}
-}
-
-int vtls_init_certinfo(struct SessionHandle *data, int num)
-{
-//	struct curl_certinfo *ci = &data->info.certs;
-	struct curl_certinfo *ci = NULL;
-	struct curl_slist **table;
-
-	/* Free any previous certificate information structures */
-	vtls_free_certinfo(data);
-
-	/* Allocate the required certificate information structures */
-	table = calloc((size_t) num, sizeof(struct curl_slist *));
-	if (!table)
-		return CURLE_OUT_OF_MEMORY;
-
-	ci->num_of_certs = num;
-	ci->certinfo = table;
-
-	return CURLE_OK;
-}
-
-/*
- * 'value' is NOT a zero terminated string
- */
-int vtls_push_certinfo_len(struct SessionHandle *data,
-	int certnum,
-	const char *label,
-	const char *value,
-	size_t valuelen)
-{
-//	struct curl_certinfo * ci = &data->info.certs;
-	struct curl_certinfo * ci = NULL;
-	char * output;
-	struct curl_slist * nl;
-	int result = CURLE_OK;
-	size_t labellen = strlen(label);
-	size_t outlen = labellen + 1 + valuelen + 1; /* label:value\0 */
-
-	output = malloc(outlen);
-	if (!output)
-		return CURLE_OUT_OF_MEMORY;
-
-	/* sprintf the label and colon */
-	snprintf(output, outlen, "%s:", label);
-
-	/* memcpy the value (it might not be zero terminated) */
-	memcpy(&output[labellen + 1], value, valuelen);
-
-	/* zero terminate the output */
-	output[labellen + 1 + valuelen] = 0;
-
-//	nl = Curl_slist_append_nodup(ci->certinfo[certnum], output);
-	if (!nl) {
-		free(output);
-		curl_slist_free_all(ci->certinfo[certnum]);
-		result = CURLE_OUT_OF_MEMORY;
-	}
-
-	ci->certinfo[certnum] = nl;
-	return result;
-}
-
-/*
- * This is a convenience function for push_certinfo_len that takes a zero
- * terminated value.
- */
-int vtls_push_certinfo(struct SessionHandle *data,
-	int certnum,
-	const char *label,
-	const char *value)
-{
-	size_t valuelen = strlen(value);
-
-	return vtls_push_certinfo_len(data, certnum, label, value, valuelen);
-}
-
-int vtls_random(vtls_session_t *data, unsigned char *entropy, size_t length)
-{
-	return backend_random(data, entropy, length);
-}
-
 int vtls_md5sum(unsigned char *tmp, /* input */
 	size_t tmplen,
 	unsigned char *md5sum, /* output */
 	size_t md5len)
 {
-	if (backend_md5sum(tmp, tmplen, md5sum, md5len) != 0) {
+	int ret;
+
+	if ((ret = backend_md5sum(tmp, tmplen, md5sum, md5len))) {
 /*		MD5_context *MD5pw;
 
 		MD5pw = Curl_MD5_init(Curl_DIGEST_MD5);
@@ -516,6 +347,8 @@ int vtls_md5sum(unsigned char *tmp, /* input */
 		Curl_MD5_final(MD5pw, md5sum);
  */
 	}
+
+	return ret;
 }
 
 /*

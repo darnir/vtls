@@ -45,6 +45,16 @@
 #define ALPN_HTTP_1_1_LENGTH 8
 #define ALPN_HTTP_1_1 "http/1.1"
 
+/* enum for the nonblocking SSL connection state machine */
+typedef enum {
+  ssl_connect_1,
+  ssl_connect_2,
+  ssl_connect_2_reading,
+  ssl_connect_2_writing,
+  ssl_connect_3,
+  ssl_connect_done
+} ssl_connect_state;
+
 typedef enum {
   ssl_connection_none,
   ssl_connection_negotiating,
@@ -193,91 +203,68 @@ typedef enum {
 	CURL_LAST /* never use! */
 } CURLcode;
 
-struct ssl_config_data {
-	long version; /* what version the client wants to use */
-	long certverifyresult; /* result from the certificate verification */
+enum {
+  CURL_SSLVERSION_DEFAULT,
+  CURL_SSLVERSION_TLSv1, /* TLS 1.x */
+  CURL_SSLVERSION_SSLv2,
+  CURL_SSLVERSION_SSLv3,
+  CURL_SSLVERSION_TLSv1_0,
+  CURL_SSLVERSION_TLSv1_1,
+  CURL_SSLVERSION_TLSv1_2,
 
-	int verifypeer; /* set TRUE if this is desired */
-	int verifyhost; /* set TRUE if CN/SAN must match hostname */
-	int verifystatus; /* set TRUE if certificate status must be checked */
-	char *CApath; /* certificate dir (doesn't work on windows) */
-	char *CAfile; /* certificate to verify peer against */
-	const char *CRLfile; /* CRL to check certificate revocation */
-	const char *issuercert; /* optional issuer certificate filename */
-	char *random_file; /* path to file containing "random" data */
-	char *egdsocket; /* path to file containing the EGD daemon socket */
-	char *cipher_list; /* list of ciphers to use */
-	size_t max_ssl_sessions; /* SSL session id cache size */
-	int sessionid; /* cache session IDs or not */
-	int certinfo; /* gather lots of certificate info */
-
-#ifdef USE_TLS_SRP
-	char *username; /* TLS username (for, e.g., SRP) */
-	char *password; /* TLS password (for, e.g., SRP) */
-	enum CURL_TLSAUTH authtype; /* TLS authentication type (default SRP) */
-#endif
+  CURL_SSLVERSION_LAST /* never use, keep last */
 };
+
+enum CURL_TLSAUTH {
+  CURL_TLSAUTH_NONE,
+  CURL_TLSAUTH_SRP,
+  CURL_TLSAUTH_LAST /* never use, keep last */
+};
+
+enum {
+	VTLS_CFG_TLS_VERSION	= 1,
+	VTLS_CFG_VERIFY_PEER,
+	VTLS_CFG_VERIFY_HOST,
+	VTLS_CFG_VERIFY_STATUS,
+	VTLS_CFG_CA_PATH,
+	VTLS_CFG_CA_FILE,
+	VTLS_CFG_CRL_FILE,
+	VTLS_CFG_ISSUER_FILE,
+	VTLS_CFG_RANDOM_FILE,
+	VTLS_CFG_EGD_SOCKET,
+	VTLS_CFG_CIPHER_LIST,
+	VTLS_CFG_LOCK_CALLBACK,
+	VTLS_CFG_LAST
+};
+
 typedef struct ssl_config_data *ssl_config_data_t;
+typedef struct _vtls_config_st vtls_config_t;
+typedef struct _vtls_session_st vtls_session_t;
 
-int vtls_config_matches(const ssl_config_data_t data,
-	const ssl_config_data_t needle);
-int vtls_config_clone(struct ssl_config_data* source,
-	struct ssl_config_data* dest);
-void vtls_config_free(struct ssl_config_data* sslc);
+int vtls_config_init(vtls_config_t **config, ...);
+int vtls_config_matches(const vtls_config_t *config1, const vtls_config_t *config2);
+int vtls_config_clone(const vtls_config_t *source, vtls_config_t **dest);
+void vtls_config_free(vtls_config_t *config);
 
-unsigned int vtls_rand(struct SessionHandle *);
+int vtls_init(vtls_config_t *config);
+void vtls_deinit(void);
+
+int vtls_session_init(vtls_session_t **sess, vtls_config_t *config);
+void vtls_session_deinit(vtls_session_t *sess);
 
 int vtls_backend(void);
-int vtls_init(void);
-void vtls_deinit(void);
-int vtls_connect(struct connectdata *conn, int sockindex);
-int vtls_connect_nonblocking(struct connectdata *conn, int sockindex, int *done);
+int vtls_connect(vtls_session_t *sess, int sockfd, const char *hostname);
+int vtls_connect_nonblocking(vtls_session_t *sess, int sockfd, int *done);
 /* tell the SSL stuff to close down all open information regarding
 	connections (and thus session ID caching etc) */
-void vtls_close_all(struct SessionHandle *data);
-void vtls_close(struct connectdata *conn, int sockindex);
-int vtls_shutdown(struct connectdata *conn, int sockindex);
-int vtls_set_engine(struct SessionHandle *data, const char *engine);
-/* Sets engine as default for all SSL operations */
-int vtls_set_engine_default(struct SessionHandle *data);
-struct curl_slist *vtls_engines_list(struct SessionHandle *data);
+void vtls_close(vtls_session_t *sess);
+int vtls_shutdown(vtls_session_t *sess);
 
-/* Certificate information list handling. */
-void vtls_free_certinfo(struct SessionHandle *data);
-int vtls_init_certinfo(struct SessionHandle * data, int num);
-int vtls_push_certinfo_len(struct SessionHandle * data, int certnum,
-	const char * label, const char * value,
-	size_t valuelen);
-int vtls_push_certinfo(struct SessionHandle * data, int certnum,
-	const char * label, const char * value);
-
-/* Functions to be used by SSL library adaptation functions */
-
-/* extract a session ID */
-int vtls_getsessionid(struct connectdata *conn,
-	void **ssl_sessionid,
-	size_t *idsize) /* set 0 if unknown */;
-/* add a new session ID */
-int vtls_addsessionid(struct connectdata *conn,
-	void *ssl_sessionid,
-	size_t idsize);
-/* Kill a single session ID entry in the cache */
-void vtls_kill_session(struct curl_ssl_session *session);
-/* delete a session from the cache */
-void vtls_delsessionid(struct connectdata *conn, void *ssl_sessionid);
-
-/* get N random bytes into the buffer, return 0 if a find random is filled
-	in */
-int vtls_random(struct SessionHandle *data, unsigned char *buffer,
-	size_t length);
+/* get N random bytes into the buffer, return 0 if a find random is filled	in */
 int vtls_md5sum(unsigned char *tmp, /* input */
 	size_t tmplen,
 	unsigned char *md5sum, /* output */
 	size_t md5len);
-/* Check pinned public key. */
-int Curl_pin_peer_pubkey(const char *pinnedpubkey,
-	const unsigned char *pubkey, size_t pubkeylen);
-
 int vtls_cert_status_request(void);
 
 #define SSL_SHUTDOWN_TIMEOUT 10000 /* ms */

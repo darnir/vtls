@@ -27,7 +27,7 @@
  * as well as the library. Do not mix with library internals!
  */
 
-// #include "curl_setup.h"
+#include <sys/time.h>
 
 struct timeval curlx_tvnow(void);
 
