@@ -39,6 +39,7 @@
 
 #include "common.h"
 #include "backend.h"
+#include "timeval.h"
 
 #ifdef USE_GNUTLS_NETTLE
 #include <gnutls/crypto.h>
@@ -1249,7 +1250,7 @@ int backend_shutdown(vtls_session_t *sess)
 				}
 			} else if (0 == what) {
 				/* timeout */
-				printf("SSL shutdown timeout"\n);
+				printf("SSL shutdown timeout\n");
 				done = 1;
 				break;
 			} else {
